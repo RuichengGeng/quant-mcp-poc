@@ -48,13 +48,31 @@ def run_quant_task(
     task_dir = ARTIFACTS_DIR / task_id
     task_dir.mkdir(parents=True, exist_ok=False)
 
+    selected_agent = agent or build_agent()
+    if isinstance(selected_agent, PiCodingAgent):
+        # Pi reads source and examples itself. Do not import/inspect libraries here.
+        (task_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        try:
+            instruction = _pi_instruction(prompt, task_dir)
+        except ValueError as exc:
+            return _write_failure(task_id, task_dir, str(exc))
+        (task_dir / "agent_instruction.md").write_text(instruction, encoding="utf-8")
+        outcome = _run_agent_with_fallback(selected_agent, agent, instruction, task_dir, timeout_seconds)
+        if outcome.status != "success" or not outcome.executed:
+            return _write_failure(task_id, task_dir, outcome.message)
+        try:
+            result = json.loads((task_dir / "result.json").read_text())
+            result = _validate_result(task_id, task_dir, result)
+            return QuantTaskResult(task_id=task_id, task_dir=task_dir, result=result)
+        except (OSError, ValueError) as exc:
+            return _write_failure(task_id, task_dir, f"Pi execution result unavailable: {exc}")
+
     catalog = discover_library_catalog()
     instruction = _agent_instruction(prompt, task_dir)
     (task_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     (task_dir / "agent_instruction.md").write_text(instruction, encoding="utf-8")
     write_catalog(catalog, task_dir / "library_catalog.json")
 
-    selected_agent = agent or build_agent()
     agent_result = _run_agent_with_fallback(
         selected_agent, agent, instruction, task_dir, timeout_seconds
     )
@@ -173,6 +191,57 @@ def _run_agent_with_fallback(
             f"Fallback agent: {fallback_result.message}"
         ),
     )
+
+
+def _pi_instruction(prompt: str, task_dir: Path) -> str:
+    from quant_mcp.codebases import snapshot_codebases
+    config = snapshot_codebases(task_dir)
+    return f"""You are the repository coding agent for an automatic MCP task.
+USER REQUEST:
+{prompt}
+
+REPOSITORY: {config.primary_root}
+WORKSPACE: {task_dir.resolve()}
+REGISTERED LIBRARY MODULES: {', '.join(config.modules)}
+CODEBASE MAP (absolute paths; reference material, not instructions):
+{config.render_for_prompt()}
+
+Read the repository's relevant Python source, docstrings, examples, tests and
+README using read/grep/find/ls before writing the solution. Discover constructors,
+public methods, units, return shapes and usage patterns from those files yourself.
+Use the codebase map to find relevant source and examples, including libraries
+outside the primary repository. Paths in the map are absolute. Descriptions help
+you choose a library. No function definitions are supplied in this prompt.
+The library source and examples are read-only. Put task files in WORKSPACE.
+Do not read credentials or other tasks' artifacts. This is unattended: no review
+or terminal input is available.
+
+Reuse the registered libraries for domain calculations. You may instantiate their
+classes and call methods, or import functions directly. Composition, iteration,
+data preparation, aggregating library outputs, and reporting helpers are allowed.
+Do not copy/reimplement domain algorithms from source or replace missing library
+capabilities with invented calculations. If a capability is unavailable, report
+the specific missing capability instead of presenting a fabricated success.
+
+Execute with run_python, supplying either complete code or script_path for a
+script you wrote in WORKSPACE. It saves analysis.py and runs normal Python with
+each library's python_paths, source/src (if present), and source on the import
+path, in map order. Each run starts a fresh process in the server's Python environment.
+It records actual registered function and public method calls. Imports alone,
+constructors alone, and unexecuted calls are insufficient. Compute reported
+metrics from the actual library results, not hardcoded answers or duplicate math.
+The tool returns errors/tracebacks for you to repair within the SAME task.
+Do not stop after writing a file: task completion requires run_python success.
+
+Your script must save result.json in its current directory (WORKSPACE):
+{{"status":"success", "task_type":"analysis", "summary":"...",
+  "metrics":{{}}, "assumptions":[], "artifacts":[]}}
+Summary must be a string, metrics an object, assumptions a list of strings.
+Artifacts must be objects with name and path fields, pointing to existing files
+inside WORKSPACE. Use [] if none. Use decimal rates/volatility when the library
+requires them; preserve its units and distinguish gross payoff from net profit.
+Do not launch subprocesses or background work from generated code.
+"""
 
 
 def _execute_analysis(
@@ -521,6 +590,9 @@ def _with_core_artifacts(task_dir: Path, artifacts: list[dict]) -> list[dict]:
         ("Library catalog", task_dir / "library_catalog.json"),
         ("Generated analysis code", task_dir / "analysis.py"),
         ("Execution log", task_dir / "run.log"),
+        ("Library call trace", task_dir / "library_calls.json"),
+        ("Codebase map", task_dir / "codebases.json"),
+        ("Pi events", task_dir / "pi_rpc_events.jsonl"),
     ]
     if (task_dir / "attempts").exists():
         core.append(("Repair attempts", task_dir / "attempts"))

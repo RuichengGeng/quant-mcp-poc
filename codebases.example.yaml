@@ -1,0 +1,24 @@
+# Copy this file to codebases.yaml, replace the paths, then set
+# QUANT_MCP_CODEBASES_FILE=codebases.yaml in .env.
+#
+# Paths may be absolute or relative to this YAML file. Pi reads the configured
+# source and example paths. The executor adds python_paths, source/src (when it
+# exists), and source to PYTHONPATH, in this order.
+libraries:
+  - module: quant_mcp.pricing
+    source: .
+    examples:
+      - examples
+    description: Deterministic European option prices and Greeks.
+
+  # Example of an external, class-based repository. Remove this entry until its
+  # path and module name match a real library on this machine.
+  #
+  # - module: my_risk_library
+  #   source: /absolute/path/to/my-risk-library
+  #   examples:
+  #     - /absolute/path/to/my-risk-library/examples
+  #     - /absolute/path/to/my-risk-library/tutorials/portfolio.py
+  #   python_paths:
+  #     - /absolute/path/to/shared-python-support
+  #   description: Portfolio risk classes; examples show session setup and reports.
