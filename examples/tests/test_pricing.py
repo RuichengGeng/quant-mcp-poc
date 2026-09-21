@@ -1,4 +1,4 @@
-from quant_mcp.pricing import (
+from pricing import (
     calc_greeks,
     calc_greeks_t,
     price_option,

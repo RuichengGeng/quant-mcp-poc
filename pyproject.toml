@@ -1,30 +1,31 @@
 [project]
 name = "quant-mcp-poc"
 version = "0.1.0"
-description = "POC MCP server for dynamic option portfolio analysis"
+description = "MCP framework for existing Python libraries and smolagents coding tasks"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.2.0,<2",
-    "numpy>=1.26",
-    "pandas>=2.2",
-    "pyyaml>=6.0",
-    "scipy>=1.12",
-    "openpyxl>=3.1",
+    "mcp>=1.29.0,<2",
+    "anyio>=4.5",
+    "pydantic>=2.11",
+    "opentelemetry-api>=1.30,<2",
 ]
 
 [project.optional-dependencies]
-smolagents-demo = [
-    "smolagents[openai]>=1.17,<2",
+agent = [
+    "smolagents[openai]>=1.26,<2",
 ]
-
+telemetry = [
+    "opentelemetry-sdk>=1.30,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+]
 [dependency-groups]
 dev = [
     "pytest>=7.4,<8",
+    "opentelemetry-sdk>=1.30,<2",
 ]
-
-[project.scripts]
-quant-mcp = "quant_mcp.server:main"
-quant-cli = "quant_mcp.cli:main"
+examples = [
+    "scipy>=1.12",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -33,9 +34,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-quant_mcp = ["pi_extensions/*.ts"]
-
 [tool.pytest.ini_options]
-pythonpath = ["src"]
-testpaths = ["tests"]
+pythonpath = ["src", "examples"]
+testpaths = ["tests", "examples/tests"]

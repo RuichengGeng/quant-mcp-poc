@@ -4,16 +4,15 @@ from quant_mcp.config import load_env_file
 
 
 def test_load_env_file_without_overriding_existing_env(tmp_path, monkeypatch) -> None:
-    for key in ["QUANT_MCP_AGENT", "PI_PROVIDER", "PI_MODEL", "PI_THINKING"]:
+    for key in ["SMOLAGENTS_MODEL_ID", "SMOLAGENTS_API_BASE", "SMOLAGENTS_MAX_STEPS"]:
         monkeypatch.delenv(key, raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
             [
-                "QUANT_MCP_AGENT=pi",
-                "PI_PROVIDER=google",
-                'PI_MODEL="gemini-3.8"',
-                "PI_THINKING=medium",
+                'SMOLAGENTS_MODEL_ID="office-model"',
+                "SMOLAGENTS_API_BASE=https://office.invalid/v1",
+                "SMOLAGENTS_MAX_STEPS=8",
                 "EXISTING=value-from-file",
             ]
         ),
@@ -23,7 +22,7 @@ def test_load_env_file_without_overriding_existing_env(tmp_path, monkeypatch) ->
 
     loaded = load_env_file(env_file)
 
-    assert loaded["PI_MODEL"] == "gemini-3.8"
-    assert os.environ["QUANT_MCP_AGENT"] == "pi"
-    assert os.environ["PI_PROVIDER"] == "google"
+    assert loaded["SMOLAGENTS_MODEL_ID"] == "office-model"
+    assert os.environ["SMOLAGENTS_API_BASE"] == "https://office.invalid/v1"
+    assert os.environ["SMOLAGENTS_MAX_STEPS"] == "8"
     assert os.environ["EXISTING"] == "value-from-env"

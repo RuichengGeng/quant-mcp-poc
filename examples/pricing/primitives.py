@@ -1,3 +1,4 @@
+"""Example domain functions; not part of the MCP framework package."""
 from __future__ import annotations
 
 from datetime import date, datetime

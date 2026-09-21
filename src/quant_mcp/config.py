@@ -3,13 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
-
-
-def load_env_file(path: Path | None = None) -> dict[str, str]:
+def load_env_file(path: Path) -> dict[str, str]:
     """Load simple KEY=VALUE lines from .env without overriding existing environment."""
-    env_path = path or DEFAULT_ENV_FILE
+    env_path = path
     loaded: dict[str, str] = {}
     if not env_path.exists():
         return loaded
@@ -31,4 +27,3 @@ def _clean_value(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
-
