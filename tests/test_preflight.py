@@ -7,6 +7,21 @@ import sys
 import pytest
 
 
+@pytest.mark.parametrize("missing", ["smolagents", "openai"])
+def test_missing_required_agent_dependency_fails_preflight(monkeypatch, missing):
+    from quant_mcp import preflight
+
+    def import_module(name):
+        if name == missing:
+            raise ModuleNotFoundError(name, name=name)
+        return object()
+
+    monkeypatch.setattr(preflight.importlib, "import_module", import_module)
+    row = next(c for c in preflight.agent_checks() if c["name"] == "agent.dependencies")
+    assert row["status"] == "FAIL"
+    assert "uv sync" in row["fix"]
+
+
 @pytest.fixture
 def application(tmp_path):
     (tmp_path / 'office.py').write_text('''from pathlib import Path

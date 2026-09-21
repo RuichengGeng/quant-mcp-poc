@@ -274,7 +274,7 @@ def _run_registered_task(prompt, functions, artifacts_dir, timeout_seconds, *, m
         response = {"status": "failed" if answer.task_type == "unsupported" else "success",
                     **answer.model_dump(mode="json"), "artifacts": list(outputs.values())}
     except ImportError as exc:
-        response["summary"] = f"Dependency unavailable: {exc}. Install the agent extra and your function packages."
+        response["summary"] = f"Dependency unavailable: {exc}. Install the framework's required dependencies and your function packages."
     except Exception as exc:
         response["summary"] = f"{type(exc).__name__}: {exc}"
     finally:

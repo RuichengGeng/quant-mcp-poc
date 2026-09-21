@@ -48,13 +48,13 @@ The server also adds a coding-task tool and result/artifact readers automaticall
 Use Python 3.11+ and `uv` on macOS/Linux. From this repository:
 
 ```bash
-uv sync --extra agent --group examples
+uv sync --group examples
 ```
 
 Check startup before connecting a client:
 
 ```bash
-uv run --extra agent --group examples python examples/framework_server.py --check
+uv run --group examples python examples/framework_server.py --check
 ```
 
 The check prints a report and exits. See [pre-flight options](#pre-flight-check)
@@ -84,7 +84,7 @@ This launches a **stdio MCP server**, not an interactive terminal chat. No netwo
 port is opened by default. An equivalent launch from the repository is:
 
 ```bash
-uv run --extra agent --group examples python examples/framework_server.py
+uv run --group examples python examples/framework_server.py
 ```
 
 Normally, let the MCP client launch the server using the configuration above;
@@ -102,7 +102,7 @@ tools](#mcp-tools-and-task-results). Try a [direct calculation, then a scenario 
 For the included example, use `--check` with the usual server command:
 
 ```bash
-uv run --extra agent --group examples python examples/framework_server.py --check
+uv run --group examples python examples/framework_server.py --check
 ```
 
 This diagnostic command prints `PASS`, `WARN`, `FAIL` or `SKIP` for each check and
@@ -120,11 +120,13 @@ an import check.
 | Telemetry setup | The application's optional setup hook completes during startup. Exporter/backend delivery is not tested. |
 | MCP stdio | The real entry point starts, completes the handshake and advertises the expected tools. Non-JSON stdout is a failure. |
 
-Missing agent dependencies or credentials produce warnings by default because
-direct functions can still work. Require locally valid agent configuration with:
+Missing or broken smolagents/OpenAI dependencies fail the check because they are
+required framework dependencies. Missing model credentials produce warnings by
+default; direct functions can still work without a model API key. Require locally
+valid agent configuration with:
 
 ```bash
-uv run --extra agent --group examples python examples/framework_server.py --check --require-agent
+uv run --group examples python examples/framework_server.py --check --require-agent
 ```
 
 For your own application, use the reusable framework command with the same Python
@@ -213,14 +215,14 @@ Use Python 3.11+ on macOS/Linux. Install the framework and your office package i
 **the same Python environment**. From an activated virtual environment:
 
 ```bash
-python -m pip install -e '/absolute/path/to/quant-mcp-poc[agent]'
+python -m pip install -e '/absolute/path/to/quant-mcp-poc'
 python -m pip install -e /absolute/path/to/office-library
 ```
 
 The framework is imported as `quant_mcp`; its distribution name is `quant-mcp-poc`.
-Omit `[agent]` only if you need direct functions and artifact access without running
-coding tasks. `run_coding_task` remains advertised but returns a failed task if the
-agent dependency is missing.
+smolagents and its OpenAI client are installed by default. Configure model
+credentials to use coding tasks; direct functions and artifact access do not
+require a model API key.
 
 An office library may be an installed package, a Git submodule, or a local module
 beside your server entry point. A Git submodule supplies files, not installed
@@ -470,7 +472,7 @@ rg 'abc123' artifacts/events.jsonl
 Install the optional SDK and OTLP/HTTP exporter:
 
 ```bash
-uv sync --extra agent --extra telemetry --group examples
+uv sync --extra telemetry --group examples
 ```
 
 For an installed package, the corresponding extra is `quant-mcp-poc[telemetry]`.
@@ -540,7 +542,7 @@ selector, the example keeps progress logs but does not configure an SDK.
 For example, after installing the extra:
 
 ```bash
-QUANT_MCP_TRACE_EXPORTER=console uv run --extra agent --extra telemetry --group examples python examples/framework_server.py
+QUANT_MCP_TRACE_EXPORTER=console uv run --extra telemetry --group examples python examples/framework_server.py
 ```
 
 For an MCP client, add `"env": {"QUANT_MCP_TRACE_EXPORTER": "console"}` to its
@@ -937,17 +939,17 @@ examples/
 tests/                 Framework, worker, transport and telemetry tests
 ```
 
-The core runtime needs MCP, its schema/runtime libraries and the OpenTelemetry
-API. The `agent` extra adds smolagents; `telemetry` adds the SDK and OTLP/HTTP
-exporter. The repository-only `examples` group supplies SciPy. Office integrations
-supply their own domain dependencies.
+The core runtime includes MCP, its schema/runtime libraries, the OpenTelemetry
+API, and smolagents with its OpenAI client. The optional `telemetry` extra adds
+the SDK and OTLP/HTTP exporter. The repository-only `examples` group supplies
+SciPy. Office integrations supply their own domain dependencies.
 
 ```bash
 # Framework tests; no pricing dependencies needed
-uv run --extra agent --extra telemetry pytest tests
+uv run --extra telemetry pytest tests
 
 # Framework and example tests
-uv run --extra agent --extra telemetry --group examples pytest
+uv run --extra telemetry --group examples pytest
 
 # Numerical checks for the example only
 uv run --group examples pytest examples/tests

@@ -28,12 +28,12 @@ def failure(name, exc):
     if isinstance(exc, ModuleNotFoundError):
         missing = exc.name or "unknown"
         fix = {
-            "scipy": "Install the example dependencies: uv sync --extra agent --group examples",
-            "smolagents": "Install the agent extra in this Python environment.",
-            "openai": "Install the agent extra in this Python environment.",
+            "scipy": "Install the example dependencies: uv sync --group examples",
+            "smolagents": "Restore required framework dependencies in this Python environment: uv sync",
+            "openai": "Restore required framework dependencies in this Python environment: uv sync",
         }.get(missing, "Install the missing package in the Python environment shown in this report.")
         if missing.startswith("opentelemetry"):
-            fix = "Install the telemetry extra when enabling an SDK/exporter: uv sync --extra agent --extra telemetry --group examples"
+            fix = "Install the telemetry extra when enabling an SDK/exporter: uv sync --extra telemetry --group examples"
         return check(name, "FAIL", f"Missing module: {missing}", fix)
     return check(name, "FAIL", f"{type(exc).__name__}; see the diagnostic log.",
                  "Fix the entry-point imports/configuration or registration error shown in the diagnostic log.")
@@ -72,10 +72,10 @@ def agent_checks():
         rows.append(check("agent.dependencies", "PASS", "smolagents and its OpenAI client are importable."))
     except Exception as exc:
         traceback.print_exc()
-        rows.append(check("agent.dependencies", "WARN", f"Agent dependencies unavailable ({type(exc).__name__}).",
-                          "Install the agent extra; direct tools can still work without it."))
+        rows.append(check("agent.dependencies", "FAIL", f"Required agent dependencies unavailable ({type(exc).__name__}).",
+                          "Restore required framework dependencies in this Python environment: uv sync"))
     finally:
-        # Some optional libraries load .env files during import. A dependency
+        # Some libraries load .env files during import. A dependency
         # probe must not silently change the application's effective settings.
         os.environ.clear()
         os.environ.update(environment)
