@@ -1461,6 +1461,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+testing = [
+    { name = "pyyaml" },
+]
 telemetry = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
@@ -1484,9 +1487,10 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'telemetry'", specifier = ">=1.30,<2" },
     { name = "opentelemetry-sdk", marker = "extra == 'telemetry'", specifier = ">=1.30,<2" },
     { name = "pydantic", specifier = ">=2.11" },
+    { name = "pyyaml", marker = "extra == 'testing'", specifier = ">=6.0" },
     { name = "smolagents", extras = ["openai"], specifier = ">=1.26,<2" },
 ]
-provides-extras = ["telemetry"]
+provides-extras = ["telemetry", "testing"]
 
 [package.metadata.requires-dev]
 dev = [

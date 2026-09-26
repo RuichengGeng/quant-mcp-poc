@@ -163,6 +163,70 @@ Application/module import code and telemetry hooks still execute and may have
 their own side effects. A `PASS` establishes local startup/protocol readiness;
 it does not prove that a later business calculation or model API call will succeed.
 
+## Deterministic MCP tool tests
+
+Projects built on this framework can run protocol-level tool tests without a chat
+application. The test runner launches the server as a child process, connects over
+stdio, performs the MCP handshake, discovers tools, invokes scenarios, and writes
+an exit status suitable for CI.
+
+The reusable implementation lives in `quant_mcp.testing`. A project supplies a
+server launch configuration and a JSON or YAML scenario suite. JSON needs no extra
+package; YAML support is available with `uv sync --extra testing`.
+
+Run the included pricing suite:
+
+```bash
+uv sync --group examples --extra testing
+uv run quant-mcp-test \
+  --config tests/mcp/server.json \
+  --suite tests/mcp/pricing.json \
+  --output artifacts/mcp-test-report.json
+```
+
+The server configuration describes the local stdio command:
+
+```json
+{
+  "server": {
+    "command": "uv",
+    "args": ["run", "--group", "examples", "python", "examples/framework_server.py"],
+    "cwd": "../..",
+    "startup_timeout_seconds": 30,
+    "call_timeout_seconds": 30
+  }
+}
+```
+
+Scenario assertions support successful/error responses, text fragments, nested
+structured content, and numeric tolerances. The expected tool list is treated as
+a required subset, which allows framework-provided tools to remain available.
+The runner reports startup duration and per-tool-call duration in its JSON report.
+
+Suites can also contain prompt scenarios. These test client behavior rather than
+the server's business functions:
+
+```json
+{
+  "id": "unsupported-weather-question",
+  "type": "prompt",
+  "prompt": "What's the weather in Singapore?",
+  "replay": {
+    "response": "I cannot answer weather questions because live weather data is unavailable.",
+    "tool_calls": []
+  },
+  "assertions": {
+    "expected_tool_calls": [],
+    "response_policy": "refuse_or_explain"
+  }
+}
+```
+
+Prompt scenarios can embed deterministic replay data in the same suite file. For
+real model/client testing, pass `--prompt-adapter module:attribute`. The adapter
+returns the final response and observed tool calls. This keeps the core test runner
+independent of any model provider.
+
 ## What happens when a user asks a question?
 
 There are two AI roles: the **client assistant** the user talks to, and the
