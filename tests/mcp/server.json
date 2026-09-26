@@ -1,0 +1,15 @@
+{
+  "server": {
+    "command": "uv",
+    "args": [
+      "run",
+      "--group",
+      "examples",
+      "python",
+      "examples/framework_server.py"
+    ],
+    "cwd": "../..",
+    "startup_timeout_seconds": 30,
+    "call_timeout_seconds": 30
+  }
+}

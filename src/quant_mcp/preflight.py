@@ -178,8 +178,7 @@ def inspect_imports(request):
 
 
 async def protocol_check(server, expected, folder, timeout):
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
+    from quant_mcp.testing.launcher import MCPTestServer, ServerSpec
 
     class Capture(logging.FileHandler):
         failed = False
@@ -196,21 +195,15 @@ async def protocol_check(server, expected, folder, timeout):
     log.handlers, log.propagate = [handler], False
     root_log.handlers = [handler]
     try:
-        params = StdioServerParameters(command=sys.executable, args=[str(server)], cwd=str(Path.cwd()))
-        with (folder / "server.log").open("w", encoding="utf-8") as errlog:
-            async with asyncio.timeout(timeout):
-                async with stdio_client(params, errlog=errlog) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        await session.send_ping()
-                        names = []
-                        cursor = None
-                        while True:
-                            result = await session.list_tools(cursor=cursor)
-                            names.extend(tool.name for tool in result.tools)
-                            cursor = result.nextCursor
-                            if cursor is None:
-                                break
+        spec = ServerSpec(
+            command=sys.executable,
+            args=(str(server),),
+            cwd=Path.cwd(),
+            startup_timeout_seconds=timeout,
+            call_timeout_seconds=timeout,
+        )
+        async with MCPTestServer(spec, stderr_path=folder / "server.log") as client:
+            names = [tool.name for tool in await client.list_tools()]
         if handler.failed:
             return check("mcp.stdio", "FAIL", "Server emitted malformed JSON-RPC on stdout.",
                          "Send startup messages/library output to stderr. Inspect client.log and server.log.")
