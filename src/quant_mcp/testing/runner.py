@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 from typing import Any, Mapping
 
-from quant_mcp.testing.assertions import assert_tool_result
+from quant_mcp.testing.assertions import assert_tool_contracts, assert_tool_result
 from quant_mcp.testing.launcher import MCPTestServer, ServerSpec
 from quant_mcp.testing.prompts import (
     PromptAdapter,
@@ -39,6 +39,7 @@ async def run_suite(
     scenarios: list[Scenario],
     *,
     expected_tools: list[str] | None = None,
+    tool_contracts: Mapping[str, Any] | None = None,
     stderr_path: Path | None = None,
     prompt_adapter: PromptAdapter | None = None,
 ) -> dict[str, Any]:
@@ -47,15 +48,21 @@ async def run_suite(
         "ok": False,
         "startup": None,
         "tools": {"expected": expected_tools or [], "actual": [], "missing": [], "unexpected": []},
+        "schemas": {"status": "PASS", "error": None},
         "cases": [],
     }
     async with MCPTestServer(spec, stderr_path=stderr_path) as server:
         report["startup"] = {"status": "PASS", "duration_ms": server.startup_duration_ms}
-        actual_tools = [tool.name for tool in await server.list_tools()]
+        tool_objects = await server.list_tools()
+        actual_tools = [tool.name for tool in tool_objects]
         report["tools"]["actual"] = actual_tools
         expected = expected_tools or []
         report["tools"]["missing"] = sorted(set(expected) - set(actual_tools))
         report["tools"]["unexpected"] = sorted(set(actual_tools) - set(expected)) if expected else []
+        try:
+            assert_tool_contracts(tool_objects, tool_contracts or {})
+        except Exception as exc:
+            report["schemas"] = {"status": "FAIL", "error": f"{type(exc).__name__}: {exc}"}
         if report["tools"]["missing"]:
             report["startup"] = {
                 "status": "FAIL",
@@ -80,6 +87,21 @@ async def run_suite(
                     )
                     assert_tool_result(result, scenario.assertions)
                     row.update({"status": "PASS", "result": _jsonable(result)})
+                elif scenario.type == "concurrent_tool":
+                    semaphore = asyncio.Semaphore(scenario.max_concurrency)
+
+                    async def call_once():
+                        async with semaphore:
+                            result = await server.call_tool(
+                                scenario.tool,
+                                scenario.arguments,
+                                timeout_seconds=scenario.timeout_seconds,
+                            )
+                            assert_tool_result(result, scenario.assertions)
+                            return _jsonable(result)
+
+                    results = await asyncio.gather(*(call_once() for _ in range(scenario.requests)))
+                    row.update({"status": "PASS", "requests": scenario.requests, "results": results})
                 elif prompt_adapter is None and (
                     embedded_prompt_adapter is None or scenario.id not in embedded_prompt_adapter.outcomes
                 ):
@@ -91,12 +113,18 @@ async def run_suite(
                         raise TypeError("prompt adapter must return PromptOutcome")
                     assert_prompt_outcome(outcome, scenario.assertions)
                     row.update({"status": "PASS", "result": _jsonable(outcome)})
+            except TimeoutError as exc:
+                if scenario.assertions.get("expect_timeout"):
+                    row.update({"status": "PASS", "expected_timeout": True})
+                else:
+                    row.update({"error": f"{type(exc).__name__}: {exc}"})
             except Exception as exc:
                 row.update({"error": f"{type(exc).__name__}: {exc}"})
             row["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
             report["cases"].append(row)
     report["ok"] = (
         report["startup"]["status"] == "PASS"
+        and report["schemas"]["status"] == "PASS"
         and not report["tools"]["missing"]
         and all(row["status"] == "PASS" for row in report["cases"])
     )

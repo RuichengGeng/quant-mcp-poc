@@ -34,3 +34,22 @@ def test_load_prompt_scenario(tmp_path):
     assert cases[0].type == "prompt"
     assert cases[0].prompt == "What is the weather?"
     assert cases[0].replay["response"] == "I cannot answer that."
+
+
+def test_load_concurrent_tool_scenario(tmp_path):
+    path = tmp_path / "concurrent.json"
+    path.write_text(json.dumps({
+        "cases": [{
+            "id": "parallel",
+            "type": "concurrent_tool",
+            "tool": "echo",
+            "requests": 4,
+            "max_concurrency": 2,
+        }],
+    }))
+
+    _, cases = load_suite(path)
+
+    assert cases[0].type == "concurrent_tool"
+    assert cases[0].requests == 4
+    assert cases[0].max_concurrency == 2

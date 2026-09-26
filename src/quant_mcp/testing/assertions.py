@@ -64,10 +64,16 @@ def _matches(actual: Any, expected: Any, path: str) -> None:
 
 def assert_tool_result(result: Any, assertions: Mapping[str, Any]) -> None:
     """Apply scenario assertions to an MCP ``CallToolResult``."""
-    if assertions.get("not_error", True) and _is_error(result):
+    expected_error = bool(assertions.get("is_error", False))
+    if assertions.get("not_error", not expected_error) and _is_error(result):
         raise AssertionFailure(f"tool returned an MCP error: {_text_content(result)}")
-    if "is_error" in assertions and _is_error(result) != bool(assertions["is_error"]):
+    if "is_error" in assertions and _is_error(result) != expected_error:
         raise AssertionFailure(f"expected is_error={assertions['is_error']!r}, got {_is_error(result)!r}")
+    if "error_contains" in assertions:
+        text = _text_content(result)
+        for needle in assertions["error_contains"]:
+            if str(needle).lower() not in text.lower():
+                raise AssertionFailure(f"error output does not contain {needle!r}: {text!r}")
     if "text_contains" in assertions:
         text = _text_content(result)
         for needle in assertions["text_contains"]:
@@ -75,3 +81,33 @@ def assert_tool_result(result: Any, assertions: Mapping[str, Any]) -> None:
                 raise AssertionFailure(f"text output does not contain {needle!r}: {text!r}")
     if "structured_content" in assertions:
         _matches(_structured_content(result), assertions["structured_content"], "structured_content")
+
+
+def assert_tool_contracts(tools: list[Any], contracts: Mapping[str, Any]) -> None:
+    """Check stable, user-facing portions of MCP tool schemas."""
+    by_name = {tool.name: tool for tool in tools}
+    for name, contract in contracts.items():
+        if name not in by_name:
+            raise AssertionFailure(f"tool contract is missing tool {name!r}")
+        if not isinstance(contract, Mapping):
+            raise AssertionFailure(f"tool contract {name!r} must be an object")
+        tool = by_name[name]
+        schema = getattr(tool, "inputSchema", getattr(tool, "input_schema", {})) or {}
+        expected_required = contract.get("required")
+        if expected_required is not None and sorted(schema.get("required", [])) != sorted(expected_required):
+            raise AssertionFailure(
+                f"tool {name!r} required parameters changed: "
+                f"expected {expected_required!r}, got {schema.get('required', [])!r}"
+            )
+        if "properties" in contract:
+            _matches(schema.get("properties", {}), contract["properties"], f"{name}.properties")
+        if "description_contains" in contract:
+            description = getattr(tool, "description", None) or ""
+            for phrase in contract["description_contains"]:
+                if str(phrase).lower() not in description.lower():
+                    raise AssertionFailure(f"tool {name!r} description does not contain {phrase!r}")
+        if "read_only" in contract:
+            annotations = getattr(tool, "annotations", None)
+            actual = getattr(annotations, "readOnlyHint", getattr(annotations, "read_only_hint", None))
+            if actual != contract["read_only"]:
+                raise AssertionFailure(f"tool {name!r} read_only changed: expected {contract['read_only']!r}, got {actual!r}")

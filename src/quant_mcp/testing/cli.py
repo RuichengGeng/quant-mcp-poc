@@ -11,7 +11,7 @@ import sys
 from quant_mcp.testing.launcher import ServerSpec
 from quant_mcp.testing.prompts import load_prompt_adapter
 from quant_mcp.testing.runner import run_suite
-from quant_mcp.testing.scenarios import load_document, load_suite
+from quant_mcp.testing.scenarios import load_document, load_suite_details
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,12 +27,14 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(config, dict) or not isinstance(config.get("server"), dict):
             raise ValueError("config must contain a server object")
         spec = ServerSpec.from_mapping(config["server"], base_dir=args.config.parent.resolve())
-        expected_tools, scenarios = load_suite(args.suite)
+        suite = load_suite_details(args.suite)
+        expected_tools, scenarios = suite.expected_tools, suite.cases
         prompt_adapter = load_prompt_adapter(args.prompt_adapter) if args.prompt_adapter else None
         report = asyncio.run(run_suite(
             spec,
             scenarios,
             expected_tools=expected_tools,
+            tool_contracts=suite.tool_contracts,
             stderr_path=args.stderr,
             prompt_adapter=prompt_adapter,
         ))

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from quant_mcp.testing.assertions import AssertionFailure, assert_tool_result
+from quant_mcp.testing.assertions import AssertionFailure, assert_tool_contracts, assert_tool_result
 
 
 def result(*, structured=None, error=False, text=""):
@@ -27,3 +27,23 @@ def test_assertions_report_mcp_errors():
 
 def test_assertions_can_require_text():
     assert_tool_result(result(text="completed successfully"), {"text_contains": ["successfully"]})
+
+
+def test_tool_contracts_check_schema_and_annotations():
+    tool = SimpleNamespace(
+        name="price",
+        inputSchema={
+            "required": ["spot"],
+            "properties": {"spot": {"type": "number"}},
+        },
+        annotations=SimpleNamespace(readOnlyHint=True),
+        description="Price an option",
+    )
+    assert_tool_contracts([tool], {
+        "price": {
+            "required": ["spot"],
+            "properties": {"spot": {"type": "number"}},
+            "description_contains": ["option"],
+            "read_only": True,
+        },
+    })

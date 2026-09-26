@@ -3,6 +3,38 @@
     "price_option_t",
     "calc_greeks_t"
   ],
+  "tool_contracts": {
+    "price_option_t": {
+      "required": [
+        "option_type",
+        "spot",
+        "strike",
+        "time_to_expiry",
+        "volatility",
+        "rate"
+      ],
+      "properties": {
+        "option_type": {
+          "type": "string",
+          "enum": ["call", "put"]
+        },
+        "spot": {"type": "number"},
+        "volatility": {"type": "number"}
+      },
+      "read_only": true
+    },
+    "calc_greeks_t": {
+      "required": [
+        "option_type",
+        "spot",
+        "strike",
+        "time_to_expiry",
+        "volatility",
+        "rate"
+      ],
+      "read_only": true
+    }
+  },
   "cases": [
     {
       "id": "price-at-the-money-call",
@@ -46,6 +78,42 @@
             "tolerance": 0.01
           }
         }
+      }
+    },
+    {
+      "id": "reject-negative-volatility",
+      "tool": "price_option_t",
+      "arguments": {
+        "option_type": "call",
+        "spot": 100,
+        "strike": 100,
+        "time_to_expiry": 1,
+        "volatility": -0.2,
+        "rate": 0.05,
+        "dividend_yield": 0
+      },
+      "assertions": {
+        "is_error": true,
+        "error_contains": ["Error executing tool"]
+      }
+    },
+    {
+      "id": "parallel-pricing-calls",
+      "type": "concurrent_tool",
+      "tool": "price_option_t",
+      "requests": 3,
+      "max_concurrency": 2,
+      "arguments": {
+        "option_type": "call",
+        "spot": 100,
+        "strike": 100,
+        "time_to_expiry": 1,
+        "volatility": 0.2,
+        "rate": 0.05,
+        "dividend_yield": 0
+      },
+      "assertions": {
+        "not_error": true
       }
     },
     {

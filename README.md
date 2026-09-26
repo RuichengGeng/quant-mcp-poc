@@ -203,6 +203,40 @@ structured content, and numeric tolerances. The expected tool list is treated as
 a required subset, which allows framework-provided tools to remain available.
 The runner reports startup duration and per-tool-call duration in its JSON report.
 
+Suites can also define schema contracts and reliability cases. Schema contracts
+check stable parts of `tools/list` without requiring an exact match for every
+framework-provided tool:
+
+```json
+{
+  "tool_contracts": {
+    "price_option_t": {
+      "required": ["option_type", "spot", "strike", "time_to_expiry", "volatility", "rate"],
+      "properties": {
+        "spot": {"type": "number"}
+      },
+      "read_only": true
+    }
+  }
+}
+```
+
+Use `is_error` and `error_contains` for validation failures, `type: "concurrent_tool"`
+with `requests` and `max_concurrency` for concurrent calls, and
+`expect_timeout: true` for an intentionally bounded call:
+
+```json
+{
+  "id": "reject-invalid-input",
+  "tool": "price_option_t",
+  "arguments": {"volatility": -0.2},
+  "assertions": {
+    "is_error": true,
+    "error_contains": ["Error executing tool"]
+  }
+}
+```
+
 Suites can also contain prompt scenarios. These test client behavior rather than
 the server's business functions:
 
