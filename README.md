@@ -45,11 +45,15 @@ The server also adds a coding-task tool and result/artifact readers automaticall
 
 ## Quick start: run the included example
 
-Use Python 3.11+ and `uv` on macOS/Linux. From this repository:
+Use Python 3.11+ and `uv` on macOS, Linux, or Windows. From this repository:
 
 ```bash
 uv sync --group examples
 ```
+
+On Windows, run the same command in PowerShell. The environment's Python
+executable is `.venv\Scripts\python.exe` (use that path in your MCP client
+configuration); on macOS/Linux it is `.venv/bin/python`.
 
 Check startup before connecting a client:
 
@@ -67,7 +71,8 @@ have priority. See [model configuration](#configure-the-model).
 
 Configure your MCP client to launch the example with the environment's Python.
 For clients using an `mcpServers` JSON configuration, the entry looks like this;
-replace both absolute paths:
+replace both absolute paths. On Windows, use `.venv\\Scripts\\python.exe` as the
+interpreter path; double the backslashes when writing it in JSON:
 
 ```json
 {
@@ -113,7 +118,7 @@ an import check.
 
 | Check | What it verifies |
 | --- | --- |
-| Python and dependencies | Interpreter path/version, POSIX support and installed core package versions. |
+| Python and dependencies | Interpreter path/version, platform worker support and installed core package versions. |
 | Application and registration | Entry-point imports, the framework application variable, tool schemas and exposed tool names. |
 | Worker imports | Registered functions import in a fresh Python process with a temporary working directory. Function bodies are not executed. |
 | Artifact storage | The configured directory can be created and written to; the temporary test file is removed. |
@@ -314,7 +319,7 @@ the server's resources.
 
 ### Install in your application environment
 
-Use Python 3.11+ on macOS/Linux. Install the framework and your office package into
+Use Python 3.11+ on macOS, Linux, or Windows. Install the framework and your office package into
 **the same Python environment**. From an activated virtual environment:
 
 ```bash
@@ -804,7 +809,7 @@ writes JSONL automatically; configure the logger separately for console output.
 
 ### Operational limits
 
-Python's `QueueHandler`/`QueueListener` moves file writes and POSIX lock waits off
+Python's `QueueHandler`/`QueueListener` moves file writes and file-lock waits off
 the MCP event loop. Each process has its own queue; a file handler locks and
 flushes complete lines across processes. Request completion asynchronously drains
 the queue, so slow storage can delay that response without blocking other
