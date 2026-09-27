@@ -5,7 +5,6 @@ import asyncio
 import importlib
 import json
 import os
-import signal
 import sys
 import tempfile
 import traceback
@@ -15,6 +14,7 @@ from pydantic_core import to_jsonable_python
 
 from quant_mcp.progress import RunContext, current_run
 from quant_mcp.tracing import configure_telemetry, extracted_context, flush_telemetry, inject_context, operation, set_outcome
+from quant_mcp.processes import kill_process, process_group_options
 
 
 async def call_function(target: str, arguments: dict, *, python_paths: tuple[Path, ...],
@@ -38,20 +38,14 @@ async def call_function(target: str, arguments: dict, *, python_paths: tuple[Pat
             process = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "quant_mcp.function_process", str(request), str(response),
                 stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=log,
-                env=env, cwd=directory, start_new_session=own_process_group,
+                env=env, cwd=directory, **process_group_options(own_process_group),
             )
             try:
                 await asyncio.wait_for(process.wait(), timeout_seconds)
             finally:
-                try:
-                    if own_process_group:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    else:
-                        # Agent tool calls keep the server process group and stop
-                        # their own child when this per-function timeout expires.
-                        process.kill()
-                except ProcessLookupError:
-                    pass
+                # Preserve the task worker's process group for agent calls so
+                # the task deadline can stop the full tree.
+                kill_process(process, entire_group=own_process_group)
                 await process.wait()
         if process.returncode != 0:
             raise RuntimeError("Library function failed; consult the server's call log")
