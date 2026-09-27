@@ -31,7 +31,7 @@ def test_concurrent_processes_append_complete_records(tmp_path):
 
 
 def test_spans_propagate_across_server_agent_and_function_processes(tmp_path):
-    """An app-owned SDK hook runs in fresh workers and exports one trace tree."""
+    """The in-process agent and isolated registered function export one trace tree."""
     import os
     import subprocess
     import sys
@@ -120,10 +120,10 @@ flush_telemetry()
     agent_root = next(s for s in roots if s['attributes']['quant_mcp.mode'] == 'coding_agent')
     agent_spans = [s for s in spans if s['context']['trace_id'] == agent_root['context']['trace_id']]
     assert {s['name'] for s in agent_spans} == {
-        'mcp.tool.call', 'task.worker', 'agent.run', 'model.generate',
+        'mcp.tool.call', 'agent.run', 'model.generate',
         'function.call', 'library.function', 'office.calculation',
     }
-    assert len(list(spans_dir.glob('*.jsonl'))) >= 4  # Actual independently configured processes.
+    assert len(list(spans_dir.glob('*.jsonl'))) >= 2  # Server process and isolated function process.
     assert len([s for s in roots if s['status']['status_code'] == 'ERROR']) == 2
     assert all(secret not in content for secret in ('SECRET_PROMPT', 'SECRET_ERROR', 'SECRET_ARGUMENT'))
     events = [json.loads(line) for line in (tmp_path / 'artifacts/events.jsonl').read_text().splitlines()]

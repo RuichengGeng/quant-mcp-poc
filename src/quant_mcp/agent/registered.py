@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_core import to_jsonable_python
 
 from quant_mcp.agent.model import env_int, build_model
 from quant_mcp.artifacts import ArtifactStore
@@ -64,14 +65,29 @@ def _input_type(schema: dict, definitions: dict) -> str | list[str]:
 
 
 def run_registered_task(prompt: str, functions: list[dict], artifacts_dir: Path,
-                        timeout_seconds: int, *, model=None, trace: RunContext | None = None) -> dict:
-    """Run in the task worker. The optional model is for deterministic testing."""
+                        timeout_seconds: int, *, model=None, trace: RunContext | None = None,
+                        function_callables: dict[str, Any] | None = None,
+                        event_loop=None) -> dict:
+    """Run CodeAgent with registered callables, normally in the server process.
+
+    The optional import fallback supports the standalone isolated task launcher.
+    """
+    if function_callables is None:
+        function_callables = {}
+        for spec in functions:
+            target = spec.get("target")
+            if not target:
+                raise ValueError("In-process registered functions cannot run in an isolated task process")
+            module, name = target.split(":", 1)
+            function_callables[spec["name"]] = getattr(importlib.import_module(module), name)
     trace = trace or RunContext(artifacts_dir.resolve(), uuid.uuid4().hex, "coding_agent", "run_coding_task")
     token = current_run.set(trace)
     try:
         with operation("agent.run", **{"quant_mcp.request_id": trace.request_id}):
             result = _run_registered_task(prompt, functions, artifacts_dir, timeout_seconds,
-                                          model=model, trace=trace)
+                                          model=model, trace=trace,
+                                          function_callables=function_callables or {},
+                                          event_loop=event_loop)
             set_outcome(result["status"])
             return result
     finally:
@@ -79,7 +95,8 @@ def run_registered_task(prompt: str, functions: list[dict], artifacts_dir: Path,
         flush_progress_logs()
 
 
-def _run_registered_task(prompt, functions, artifacts_dir, timeout_seconds, *, model, trace):
+def _run_registered_task(prompt, functions, artifacts_dir, timeout_seconds, *, model, trace,
+                         function_callables, event_loop):
     # smolagents executes generated code in its own thread. Capture the agent
     # span and run metadata here, then enter a fresh context for each tool call.
     execution_context = copy_context()
@@ -138,6 +155,7 @@ def _run_registered_task(prompt, functions, artifacts_dir, timeout_seconds, *, m
             def __init__(self, spec):
                 self.spec = spec
                 self.name = spec["name"]
+                self.function = function_callables[self.name]
                 schema = spec["input_schema"]
                 self.description = spec["description"] + "\nArgument JSON schema: " + json.dumps(schema)
                 self.inputs = {
@@ -146,8 +164,7 @@ def _run_registered_task(prompt, functions, artifacts_dir, timeout_seconds, *, m
                            **({"nullable": True} if name not in schema.get("required", []) else {})}
                     for name, field in schema["properties"].items()
                 }
-                module, name = spec["target"].split(":", 1)
-                self.signature = inspect.signature(getattr(importlib.import_module(module), name))
+                self.signature = inspect.signature(self.function, eval_str=True)
                 super().__init__()
 
             @in_agent_context
@@ -165,11 +182,30 @@ def _run_registered_task(prompt, functions, artifacts_dir, timeout_seconds, *, m
                     (workspace / "function_calls.json").write_text(json.dumps(calls, indent=2))
                     try:
                         arguments = self.signature.bind(*args, **kwargs).arguments
-                        value = asyncio.run(call_function(
-                            self.spec["target"], arguments, python_paths=python_paths,
-                            log_path=workspace / "function_logs" / f"{entry['call_id']}.log",
-                            timeout_seconds=budget, own_process_group=False,
-                        ))
+                        if self.spec.get("execution") == "in_process":
+                            if inspect.iscoroutinefunction(self.function):
+                                if event_loop is None:
+                                    value = asyncio.run(self.function(**arguments))
+                                else:
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        self.function(**arguments), event_loop,
+                                    )
+                                    try:
+                                        value = future.result(timeout=budget)
+                                    except TimeoutError:
+                                        future.cancel()
+                                        raise
+                            else:
+                                value = self.function(**arguments)
+                                if time.monotonic() - started > budget:
+                                    raise TimeoutError("In-process function exceeded its timeout")
+                            value = to_jsonable_python(value)
+                        else:
+                            value = asyncio.run(call_function(
+                                self.spec["target"], arguments, python_paths=python_paths,
+                                log_path=workspace / "function_logs" / f"{entry['call_id']}.log",
+                                timeout_seconds=budget,
+                            ))
                         entry["status"] = "success"
                         return value
                     except Exception as exc:

@@ -145,19 +145,21 @@ def test_coding_task_configuration_busy_limit_and_cancellation(office, monkeypat
     app, _ = office
     app.max_concurrent_calls = 1
     called = []
+    import threading
+    entered, release = threading.Event(), threading.Event()
+
+    def fake_task(prompt, functions, artifacts_dir, timeout_seconds, **kwargs):
+        called.append((functions, kwargs))
+        if prompt == "analyse":
+            entered.set()
+            assert release.wait(timeout=5)
+        return {"status": "success", "task_id": "task_example"}
+
+    monkeypatch.setattr("quant_mcp.framework.run_registered_task", fake_task)
 
     async def exercise():
-        entered, release = asyncio.Event(), asyncio.Event()
-
-        async def fake_worker(prompt, timeout_seconds, **kwargs):
-            called.append(kwargs)
-            entered.set()
-            await release.wait()
-            return {"status": "success", "task_id": "task_example"}
-
-        monkeypatch.setattr("quant_mcp.framework.run_task_process", fake_worker)
         running = asyncio.create_task(app.mcp.call_tool("run_coding_task", {"prompt": "analyse"}))
-        await entered.wait()
+        assert await asyncio.to_thread(entered.wait, 5)
         from quant_mcp.progress import flush_progress_logs
         await asyncio.to_thread(flush_progress_logs)
         # The arrival is visible while execution is still blocked.
@@ -167,15 +169,16 @@ def test_coding_task_configuration_busy_limit_and_cancellation(office, monkeypat
         with pytest.raises(Exception, match="busy"):
             await app.mcp.call_tool("run_coding_task", {"prompt": "second"})
         running.cancel()
+        release.set()
         with pytest.raises(asyncio.CancelledError):
             await running
         assert app._active == 0
-        release.set()
         await app.mcp.call_tool("run_coding_task", {"prompt": "retry"})
         with pytest.raises(Exception, match="1..300"):
             await app.mcp.call_tool("run_coding_task", {"prompt": "task", "timeout_seconds": 301})
-        assert all(c == {"functions": [], "python_paths": app._python_paths(),
-                         "artifacts_dir": app.artifacts.root} for c in called)
+        assert all(functions == [] and kwargs["function_callables"] == {}
+                   and kwargs["event_loop"] is asyncio.get_running_loop()
+                   and kwargs["trace"] is not None for functions, kwargs in called)
 
     asyncio.run(exercise())
     events = [json.loads(line) for line in (app.artifacts.root / "events.jsonl").read_text().splitlines()]
@@ -370,30 +373,15 @@ def test_agent_tool_names_are_validated(office):
     assert app._functions == []
 
 
-def test_registry_task_roundtrip_through_worker_and_artifact_mcp(office, tmp_path, monkeypatch):
+def test_registry_task_roundtrip_through_agent_and_artifact_mcp(office, tmp_path, monkeypatch):
     app, library = office
     app.expose(library.position_value)
-    # Stub only model generation inside the subprocess, retaining the real task
-    # worker, CodeAgent interpreter, function process and artifact MCP tools.
-    hook = tmp_path / "hooks"
-    hook.mkdir()
-    (hook / "sitecustomize.py").write_text('''from smolagents.models import Model, ChatMessage
-from quant_mcp.agent import registered
-
-class ModelStub(Model):
-    def __init__(self):
-        super().__init__(model_id="test-model")
-    def generate(self, messages, **kwargs):
-        return ChatMessage(role="assistant", content="""<code>
-result = position_value(position={"quantity": 6, "price": 7})
-write_artifact(filename="value.txt", content=str(result["value"]))
-final_answer({"task_type":"analysis", "summary":"Calculated", "metrics":result})
-</code>""")
-
-registered.build_model = lambda timeout: ModelStub()
-''')
-    monkeypatch.setenv("PYTHONPATH", str(hook))
     monkeypatch.setenv("SMOLAGENTS_PLANNING_INTERVAL", "0")
+    monkeypatch.setattr("quant_mcp.agent.registered.build_model", lambda timeout: scripted_model([
+        'result = position_value(position={"quantity": 6, "price": 7})\n'
+        'write_artifact(filename="value.txt", content=str(result["value"]))\n'
+        'final_answer({"task_type":"analysis", "summary":"Calculated", "metrics":result})',
+    ]))
 
     async def exercise():
         response = (await app.mcp.call_tool("run_coding_task", {"prompt": "Calculate value", "timeout_seconds": 20}))[1]
@@ -410,7 +398,7 @@ registered.build_model = lambda timeout: ModelStub()
         trace = (await app.mcp.call_tool("read_artifact", {
             "task_id": task_id, "filename": "events.jsonl"}))[1]
         events = [json.loads(line) for line in trace["content"].splitlines()]
-        assert events[0]["event"] == "task_created"
+        assert events[0]["event"] == "agent_started"
         assert events[-1]["event"] == "request_finished"
         assert events[-1]["status"] == "success"
         assert {e["request_id"] for e in events} == {response["request_id"]}
@@ -426,37 +414,64 @@ registered.build_model = lambda timeout: ModelStub()
 
 def test_registry_task_timeout_kills_function_and_descendants(office, tmp_path, monkeypatch):
     app, library = office
-    app.expose(library.delayed_file)
+    app.expose(library.delayed_file, timeout_seconds=1)
     marker = tmp_path / "child-survived"
-    hook = tmp_path / "hooks"
-    hook.mkdir()
     code = f"delayed_file(filename={str(marker)!r})"
-    (hook / "sitecustomize.py").write_text('''from smolagents.models import Model, ChatMessage
-from quant_mcp.agent import registered
-class ModelStub(Model):
-    def __init__(self):
-        super().__init__(model_id="test-model")
-    def generate(self, messages, **kwargs):
-        return ChatMessage(role="assistant", content=''' + repr("<code>\n" + code + "\n</code>") + ''')
-registered.build_model = lambda timeout: ModelStub()
-''')
-    monkeypatch.setenv("PYTHONPATH", str(hook))
     monkeypatch.setenv("SMOLAGENTS_PLANNING_INTERVAL", "0")
+    monkeypatch.setattr("quant_mcp.agent.registered.build_model", lambda timeout: scripted_model([
+        code,
+        'final_answer({"task_type":"unsupported", "summary":"The registered function timed out"})',
+    ]))
 
     async def exercise():
         response = (await app.mcp.call_tool("run_coding_task", {
-            "prompt": "Exercise timeout", "timeout_seconds": 2}))[1]
+            "prompt": "Exercise timeout", "timeout_seconds": 10}))[1]
         assert response["status"] == "failed"
-        assert "overall limit" in response["summary"]
+        assert response["task_type"] == "unsupported"
         assert Path(str(marker) + ".ready").exists(), "Function must start before timeout"
         await asyncio.sleep(4)
-        assert not marker.exists(), "Function descendants must be killed with the worker"
+        assert not marker.exists(), "Function descendants must be killed on timeout"
         assert app._active == 0
         saved = app.artifacts.result(response["task_id"])
         assert saved["summary"] == response["summary"]
         events = [json.loads(line) for line in (Path(response["task_dir"]) / "events.jsonl").read_text().splitlines()]
+        calls = [event for event in events if event["event"] == "function_call_finished"]
+        assert calls[0]["status"] == "timed_out"
         assert events[-1]["event"] == "request_finished"
-        assert events[-1]["status"] == "timed_out"
         assert events[-1]["request_id"] == response["request_id"]
+
+    asyncio.run(exercise())
+
+
+def test_in_process_service_instance_is_shared_with_agent(office, monkeypatch):
+    class Counter:
+        def __init__(self):
+            self.value = 0
+
+        def next_value(self) -> int:
+            """Return the next value from this service instance."""
+            self.value += 1
+            return self.value
+
+        def close(self):
+            pass
+
+    app, _ = office
+    counter = app.manage(Counter())
+    app.expose(counter.next_value, execution="in_process")
+    monkeypatch.setenv("SMOLAGENTS_PLANNING_INTERVAL", "0")
+    monkeypatch.setattr("quant_mcp.agent.registered.build_model", lambda timeout: scripted_model([
+        'value = next_value()\n'
+        'final_answer({"task_type":"analysis", "summary":"Read the shared counter", '
+        '"metrics":{"value":value}})',
+    ]))
+
+    async def exercise():
+        direct = (await app.mcp.call_tool("next_value", {}))[1]
+        agent = (await app.mcp.call_tool("run_coding_task", {"prompt": "Read the next counter value"}))[1]
+        assert direct == {"result": 1}
+        assert agent["status"] == "success", agent
+        assert agent["metrics"] == {"value": 2}
+        assert counter.value == 2
 
     asyncio.run(exercise())

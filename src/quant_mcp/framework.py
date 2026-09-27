@@ -5,6 +5,7 @@ import functools
 import asyncio
 import importlib
 import inspect
+import os
 import keyword
 import logging
 import sys
@@ -19,7 +20,7 @@ from opentelemetry.trace import SpanKind
 
 from quant_mcp.artifacts import ArtifactStore
 from quant_mcp.function_process import call_function
-from quant_mcp.task_process import run_task_process
+from quant_mcp.agent.registered import run_registered_task
 from quant_mcp.progress import RunContext, current_run, emit_event, flush_progress_logs, logger, setup_progress_logging
 from quant_mcp.tracing import configure_telemetry, flush_telemetry, operation, set_outcome
 
@@ -70,13 +71,42 @@ class _TracedMCP(FastMCP):
             with anyio.CancelScope(shield=True):
                 await anyio.to_thread.run_sync(flush_progress_logs)
 
+    async def run_stdio_async(self) -> None:
+        """Keep application stdout noise away from the stdio JSON-RPC stream."""
+        import anyio
+        from io import TextIOWrapper
+        from mcp.server.stdio import stdio_server
+
+        sys.stdout.flush()
+        protocol_fd = os.dup(sys.stdout.fileno())
+        saved_stdout_fd = os.dup(sys.stdout.fileno())
+        stderr_fd = os.dup(sys.stderr.fileno())
+        protocol_stdout = anyio.wrap_file(
+            TextIOWrapper(os.fdopen(protocol_fd, "wb", buffering=0), encoding="utf-8")
+        )
+        try:
+            # stdio_server gets its own copy of the original stdout pipe. Redirect
+            # fd 1 for the lifetime of the server so print() and os.write(1, ...)
+            # from in-process tools cannot corrupt MCP messages.
+            os.dup2(stderr_fd, sys.stdout.fileno())
+            async with stdio_server(stdout=protocol_stdout) as (read_stream, write_stream):
+                await self._mcp_server.run(
+                    read_stream,
+                    write_stream,
+                    self._mcp_server.create_initialization_options(),
+                )
+        finally:
+            os.dup2(saved_stdout_fd, sys.stdout.fileno())
+            os.close(saved_stdout_fd)
+            os.close(stderr_fd)
+
 
 class MCPFramework:
     """Explicit direct tools plus a built-in smolagents coding-task tool.
 
-    Use one instance per application. Libraries must be importable in the same
-    environment. expose() registers functions for both MCP and the coding agent.
-    Function execution is process-isolated, not sandboxed.
+    Use one instance per application. expose() registers functions for both MCP
+    and the coding agent. Selected in-process functions can share managed
+    application resources; isolated functions run in child processes.
     """
 
     def __init__(self, name: str, *, artifacts_dir: str | Path,
@@ -87,9 +117,12 @@ class MCPFramework:
         configure_telemetry(telemetry_setup)
         setup_progress_logging()
         self._functions: list[dict] = []
+        self._function_callables: dict[str, Callable] = {}
+        self._managed_resources: list[Any] = []
         self.artifacts = ArtifactStore(Path(artifacts_dir))
         self.max_timeout_seconds = max_timeout_seconds
         self.max_concurrent_calls = max_concurrent_calls
+        self.telemetry_setup = telemetry_setup
         self._active = 0
         self._names: set[str] = set()
         self._modes: dict[str, str] = {}
@@ -105,10 +138,15 @@ class MCPFramework:
             if not prompt.strip():
                 raise ValueError("prompt must not be empty")
             self._check_timeout(timeout_seconds)
-            return await run_task_process(
-                prompt, timeout_seconds, artifacts_dir=self.artifacts.root,
-                functions=list(self._functions), python_paths=self._python_paths(),
-            )
+            trace = current_run.get()
+            if trace is None:
+                raise RuntimeError("Coding task requires an active MCP request context")
+            import anyio
+            return await anyio.to_thread.run_sync(functools.partial(
+                run_registered_task, prompt, list(self._functions), self.artifacts.root,
+                timeout_seconds, function_callables=dict(self._function_callables),
+                event_loop=asyncio.get_running_loop(), trace=trace,
+            ))
 
         def list_tasks(limit: int = 20) -> list[dict]:
             """List recent task IDs; use get_task_result for their status and summary."""
@@ -139,6 +177,32 @@ class MCPFramework:
     def _check_timeout(self, timeout_seconds: int) -> None:
         if not 1 <= timeout_seconds <= self.max_timeout_seconds:
             raise ValueError(f"timeout_seconds must be 1..{self.max_timeout_seconds}")
+
+    def manage(self, resource: Any) -> Any:
+        """Register an app-owned service for cleanup when the server stops.
+
+        The resource must provide close() or dispose(). Expose bound
+        service methods with execution="in_process" so MCP and smolagents share it.
+        """
+        if not any(callable(getattr(resource, method, None)) for method in ("close", "dispose")):
+            raise TypeError("Managed resources must provide close() or dispose()")
+        if any(item is resource for item in self._managed_resources):
+            raise ValueError("Resource is already managed")
+        self._managed_resources.append(resource)
+        return resource
+
+    def _close_managed_resources(self) -> None:
+        errors = []
+        for resource in reversed(self._managed_resources):
+            close = getattr(resource, "close", None) or getattr(resource, "dispose")
+            try:
+                close()
+            except Exception as exc:
+                errors.append(exc)
+                logger.exception("Failed to close managed application resource")
+        self._managed_resources.clear()
+        if errors:
+            raise RuntimeError(f"Failed to close {len(errors)} managed application resource(s)") from errors[0]
 
     @staticmethod
     def _python_paths() -> tuple[Path, ...]:
@@ -189,24 +253,34 @@ class MCPFramework:
         self._modes[tool_name] = mode
 
     def expose(self, function: Callable, *, name: str | None = None,
-               read_only: bool = False, timeout_seconds: int = 60) -> Callable:
-        """Expose one importable top-level function, preserving its typed schema.
+               read_only: bool = False, timeout_seconds: int = 60,
+               execution: str = "isolated") -> Callable:
+        """Expose a typed function or service method to MCP and smolagents.
 
         Functions should return JSON-compatible values (or Pydantic models).
-        Use a top-level wrapper for class methods, DataFrames or custom objects.
-        This same function name, documentation and schema are used by CodeAgent.
+        The same callable, name, documentation and schema are used by both MCP
+        and CodeAgent. The default isolated mode starts a fresh process per call.
+        Use execution="in_process" for functions that should share app resources.
         """
         self._check_timeout(timeout_seconds)
-        if not inspect.isfunction(function) or function.__qualname__ != function.__name__ or function.__module__ == "__main__":
-            raise ValueError("Expose an importable top-level function; wrap methods in your library")
+        if execution not in {"isolated", "in_process"}:
+            raise ValueError("execution must be 'isolated' or 'in_process'")
+        if not (inspect.isfunction(function) or inspect.ismethod(function)):
+            raise ValueError("Expose a Python function or bound service method")
         module = function.__module__
         tool_name = name or function.__name__
         if not tool_name.isidentifier() or keyword.iskeyword(tool_name):
             raise ValueError("Tool name must be a valid Python identifier")
         if tool_name in {"final_answer", "write_artifact", "read_written_artifact"}:
             raise ValueError(f"Reserved agent tool name: {tool_name}")
-        if getattr(importlib.import_module(module), function.__name__, None) is not function:
-            raise ValueError("Function must be importable by its original name")
+        import_target = None
+        if execution == "isolated":
+            if (not inspect.isfunction(function) or function.__qualname__ != function.__name__
+                    or function.__module__ == "__main__"):
+                raise ValueError("Isolated functions must be importable top-level functions")
+            if getattr(importlib.import_module(module), function.__name__, None) is not function:
+                raise ValueError("Function must be importable by its original name")
+            import_target = f"{module}:{function.__name__}"
         signature = inspect.signature(function, eval_str=True)
         if any(p.kind in {p.POSITIONAL_ONLY, p.VAR_POSITIONAL, p.VAR_KEYWORD} for p in signature.parameters.values()):
             raise ValueError("MCP functions need named parameters; wrap positional-only or variadic functions")
@@ -222,12 +296,25 @@ class MCPFramework:
                 status, error_type = "failed", None
                 emit_event(trace, "function_call_started", function=tool_name, call_id=call_id)
                 try:
-                    result = await call_function(
-                        f"{module}:{function.__name__}", kwargs,
-                        python_paths=self._python_paths(),
-                        log_path=self.artifacts.root / "function_logs" / f"{call_id}.log",
-                        timeout_seconds=timeout_seconds,
-                    )
+                    if execution == "in_process":
+                        if inspect.iscoroutinefunction(function):
+                            result = await asyncio.wait_for(function(**kwargs), timeout=timeout_seconds)
+                        else:
+                            import anyio
+                            result = await anyio.to_thread.run_sync(
+                                functools.partial(function, **kwargs), abandon_on_cancel=False,
+                            )
+                            if time.monotonic() - started > timeout_seconds:
+                                raise TimeoutError("In-process function exceeded its timeout")
+                        from pydantic_core import to_jsonable_python
+                        result = to_jsonable_python(result)
+                    else:
+                        result = await call_function(
+                            import_target, kwargs,
+                            python_paths=self._python_paths(),
+                            log_path=self.artifacts.root / "function_logs" / f"{call_id}.log",
+                            timeout_seconds=timeout_seconds,
+                        )
                     status = "success"
                     return result
                 except asyncio.CancelledError:
@@ -249,11 +336,13 @@ class MCPFramework:
         self._register(invoke, name=name, read_only=read_only, limited=True)
         from mcp.server.fastmcp.utilities.func_metadata import func_metadata
         self._functions.append({
-            "name": tool_name, "target": f"{module}:{function.__name__}",
+            "name": tool_name, "target": import_target,
             "description": inspect.getdoc(function) or f"Call {tool_name}.",
             "input_schema": func_metadata(function).arg_model.model_json_schema(),
             "timeout_seconds": timeout_seconds,
+            "execution": execution,
         })
+        self._function_callables[tool_name] = function
         return function
 
     def run(self, transport: str = "stdio") -> None:
@@ -275,5 +364,8 @@ class MCPFramework:
         try:
             self.mcp.run(transport=transport)
         finally:
-            flush_progress_logs()
-            flush_telemetry()
+            try:
+                self._close_managed_resources()
+            finally:
+                flush_progress_logs()
+                flush_telemetry()

@@ -47,8 +47,8 @@ async def call_function(target: str, arguments: dict, *, python_paths: tuple[Pat
                     if own_process_group:
                         os.killpg(process.pid, signal.SIGKILL)
                     else:
-                        # Agent tools inherit the task worker's process group so
-                        # the overall task timeout also terminates their children.
+                        # Agent tool calls keep the server process group and stop
+                        # their own child when this per-function timeout expires.
                         process.kill()
                 except ProcessLookupError:
                     pass
