@@ -5,7 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 
 
-def test_stdio_task_worker_survives_noisy_model_and_returns_artifacts(tmp_path):
+def test_stdio_agent_survives_noisy_model_and_returns_artifacts(tmp_path):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
@@ -63,10 +63,7 @@ app.run()
                     assert result["status"] == "success", result
                     assert result["metrics"] == {"value": 3}
                     assert Path(result["task_dir"]).parent == artifacts
-                    log = Path(result["worker_log"]).read_text()
-                    assert "worker-python-noise" in log and "worker-native-noise" in log
-                    assert '"name": "agent.run"' in log
-                    assert '"name": "model.generate"' in log
+                    assert "worker_log" not in result
                     report = await session.call_tool("read_artifact", {
                         "task_id": result["task_id"], "filename": "outputs/answer.txt",
                     })
@@ -75,3 +72,7 @@ app.run()
                     assert (await session.list_tools()).tools
 
     asyncio.run(exercise())
+    stderr = (tmp_path / "stderr.log").read_text()
+    assert "worker-python-noise" in stderr and "worker-native-noise" in stderr
+    assert '"name": "agent.run"' in stderr
+    assert '"name": "model.generate"' in stderr

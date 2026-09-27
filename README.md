@@ -94,8 +94,9 @@ There is no chat prompt or browser page. **Do not type text or press Enter**:
 even a blank line is sent to the JSON-RPC parser and produces an `Invalid JSON`
 error. Send questions through your connected MCP client instead.
 
-The client should discover `price_option_t`, `calc_greeks_t`, and the [five built-in
-tools](#mcp-tools-and-task-results). Try a [direct calculation, then a scenario report](#pricing-example).
+The client should discover `price_option_t`, `calc_greeks_t`, `get_quote`,
+`get_quote_isolated`, and the [five built-in tools](#mcp-tools-and-task-results).
+Try a [direct calculation, then a scenario report](#pricing-example).
 
 ## Pre-flight check
 
@@ -294,16 +295,20 @@ tool. The client can also compose a few direct calls itself.
 | “Compare five scenarios across these trades and save a report.” | `run_coding_task` | Python can coordinate repeated calls, comparisons and reporting. |
 | “Explain what this returned value means.” | Client assistant answers | Another calculation may not be needed. |
 
-A direct call validates inputs, executes your function in a child process and
-returns its result. It makes **no internal model call**.
+A direct call validates inputs, executes your function and returns its result.
+By default, it starts a fresh child process. Functions registered with
+`execution="in_process"` run in the server process and can share app resources.
+Direct calls make **no internal model call**.
 
 For a coding task, CodeAgent receives the exposed function names, schemas and
 docstrings. It writes and executes Python, inspects observations, and can repair
 errors. Variables persist between its code actions within that task. It calls
 function wrappers directly—there is no MCP round trip back to its own server—and
 can save reports with artifact helpers. It does not browse repositories or import
-your office modules into its code interpreter. Your function implementations still
-run as normal Python in child processes.
+your office modules into its code interpreter. The agent runs in the server
+process and calls the same registered function objects as direct MCP calls.
+Isolated functions still run in fresh child processes; in-process functions share
+the server's resources.
 
 ## Integrate your own library
 
@@ -392,24 +397,69 @@ is shared, so there is no second list of tools to maintain for the agent.
 
 | Requirement | Guidance |
 | --- | --- |
-| Importable function | Use a top-level function in a module/package, not a function defined in `__main__`, a closure or a bound method. |
+| Callable | Isolated functions must be importable top-level functions. In-process functions can also be bound service methods. |
 | Named, typed arguments | Annotate every parameter and the return value. Positional-only parameters, `*args` and `**kwargs` need a wrapper. |
 | Useful docstring | State what it does, when to use it, argument units, sign conventions, defaults, return keys and relevant errors. Both assistants depend on this information. |
 | Serializable values | Return JSON-compatible values or Pydantic models. Convert DataFrames/custom objects in a thin wrapper. |
-| Sync or async | Both are supported. Each call starts a fresh process; pass identifiers/data rather than live connections or objects. |
-| Explicit data locations | Workers use temporary working directories. Do not rely on the server's current directory for input files. |
+| Sync or async | Both are supported. Isolated calls use a fresh process; in-process calls run in the server process. |
+| Explicit data locations | Isolated calls use temporary working directories. Do not rely on the server's current directory for input files. |
 
 Use `app.expose(function, name="tool_alias")` to publish the same alias to MCP and
 the agent. Names must be valid Python identifiers. Duplicate names, built-in MCP
 names, `final_answer`, `write_artifact` and `read_written_artifact` are reserved.
 
-For a class-based library, create a top-level function that constructs the object,
-calls its method and returns serializable data. Avoid printing or other side
-effects during module import; imports also occur in worker processes.
+The existing [framework example server](examples/framework_server.py) includes
+two CSV-backed tools using the same mock data:
+
+```python
+csv_provider = CsvDataProvider()  # reads sample_market_data.csv once
+app.manage(csv_provider)          # calls provider.close() at server shutdown
+app.expose(csv_provider.get_quote, read_only=True, execution="in_process")
+app.expose(get_quote_from_csv, read_only=True, name="get_quote_isolated")
+```
+
+The `get_quote` tool uses the provider object held by the server. The
+`get_quote_isolated` tool starts a child process and reads the CSV for that call.
+Both tools are in the registry given to smolagents, so an agent call follows the
+same behavior as a direct MCP call. If you edit the CSV while the server is
+running, `get_quote` keeps using the loaded snapshot; restarting reloads it.
+`get_quote_isolated` reads the updated file on its next call. Run the example with
+`python examples/framework_server.py`.
+
+For a real database, the managed service can own a reusable engine/pool and any
+cache. `manage()` calls its `close()` or `dispose()` method when the server exits.
+Store cache policy in the service or data layer, where the correct cache key and
+expiry are known. In-memory cache entries disappear when the server restarts.
+In-process functions must not print to stdout because stdio MCP uses stdout for
+protocol messages; use logging to stderr instead.
+
+Avoid opening database connections or causing other side effects during module
+import. Isolated functions are imported in child processes; in-process services
+should initialize reusable resources as part of application setup.
 
 `read_only=True` is a hint to MCP clients, not an access-control mechanism. Mark it
 only when the function does not change external state. Registration exposes that
 function to both paths; the current API has no MCP-only or agent-only switch.
+
+### In-process function behavior
+
+Use `execution="in_process"` only for functions that need to share a long-lived
+service, database pool or cache with the MCP server and coding agent. Register
+the service with `app.manage()` so its `close()` or `dispose()` method
+runs during server shutdown. Each function should still borrow a connection/session
+from the pool for its own operation; do not share one live session across calls.
+Protect mutable cache state if direct calls and agent tasks may access it
+concurrently.
+
+The framework does not cache arbitrary function results. Put TTL caching in the
+service or data layer, including all tenant/user scope in its cache key. A
+process-local cache is cleared when the MCP server restarts.
+
+In-process synchronous functions run in a background thread so they do not block
+the MCP event loop. A running Python function cannot be forcibly terminated, so
+configure timeouts in its database and network clients. Keep the default
+`execution="isolated"` for functions that need a hard process timeout or stdout
+containment.
 
 ## Configure the model
 
@@ -468,17 +518,15 @@ A coding-task response has this shape (IDs and paths below are illustrative):
   "summary": "Compared the requested positions",
   "metrics": {"total_value": 700.0},
   "assumptions": [],
-  "artifacts": [{"name": "values.csv", "path": "outputs/values.csv"}],
-  "worker_log": "/server/artifacts/worker_logs/....log"
+  "artifacts": [{"name": "values.csv", "path": "outputs/values.csv"}]
 }
 ```
 
 `get_task_result` reads the saved result fields; `request_id`, `task_id`, `task_dir`
-and `worker_log` are added by the task/transport layer, not stored in `result.json`.
-Task IDs are allocated before launching the worker. Handled worker exits and
-overall timeouts save a failed `result.json` and return those IDs; cancellation
-saves the failure but propagates cancellation to the caller. Failures before a
-worker starts, such as an unwritable artifacts directory, can raise an MCP error.
+are added to the response, not stored in `result.json`. Task IDs are allocated
+before the agent starts. Agent errors save a failed `result.json`; failures before
+the agent starts, such as an unwritable artifacts directory, can raise an MCP
+error.
 
 Check **both `status` and `task_type`**:
 
@@ -548,7 +596,7 @@ A propagated, non-recording context can also supply IDs even without local expor
 | `request_id` | Framework ID for one MCP tool call, retained across workers. Separate from an OTel trace ID, MCP JSON-RPC ID or chat ID. |
 | `mode` | `direct`, `coding_agent`, `artifact`, or `unknown` for an unregistered tool. |
 | `tool` | Incoming MCP tool name; stays `run_coding_task` throughout its agent work. |
-| `task_id` | Coding-task directory ID, allocated before launching the task worker. |
+| `task_id` | Coding-task directory ID, allocated before starting the agent. |
 | `trace_id`, `span_id` | Current OpenTelemetry context, captured before the log crosses the logging queue. |
 | `function`, `call_id` | Particular function invocation inside the request/task. |
 | `status`, `duration_ms` | Outcome and elapsed time on completion events where applicable. |
@@ -727,7 +775,6 @@ while an agent that catches its own deadline error may return a failed result.
 | --- | --- |
 | `events.jsonl` | Global live timeline, including arrival before a task ID exists. |
 | `function_logs/<request_id>.log` | Direct function stdout/stderr and diagnostics. |
-| `worker_logs/<request_id>.log` | Coding worker console output and diagnostics. |
 | `<task_id>/events.jsonl` | Task progress from task creation through the parent's final event. |
 | `<task_id>/prompt.txt` | Original coding-task prompt. |
 | `<task_id>/registry.json` | Snapshot of exposed functions. |
@@ -790,7 +837,8 @@ supplied inputs, not live market data. Connect the example server using the
 [quick start](#quick-start-run-the-included-example); coding tasks also need
 [model credentials](#configure-the-model).
 
-The entry point imports `pricing` from the sibling directory and exposes only:
+The entry point imports `pricing` from the sibling directory and exposes these
+pricing functions:
 
 | Function | Result |
 | --- | --- |
@@ -897,9 +945,9 @@ and artifact access. Pricing stays outside `src/`.
 | File | Responsibility |
 | --- | --- |
 | [framework.py](src/quant_mcp/framework.py) | Public `MCPFramework` API, explicit registration, MCP tools, admission limits and audit events. |
-| [function_process.py](src/quant_mcp/function_process.py) | Import a registered target, validate arguments, execute sync/async functions and transfer serializable results in a child process. |
-| [task_process.py](src/quant_mcp/task_process.py) | Launch the task worker, capture console output, enforce the overall deadline and clean up its process group. |
-| [agent/registered.py](src/quant_mcp/agent/registered.py) | Build smolagents tools from the registry, run CodeAgent, validate final answers, save reports and execution traces. |
+| [function_process.py](src/quant_mcp/function_process.py) | Import a registered target, validate arguments, execute isolated sync/async functions and transfer serializable results in a child process. |
+| [task_process.py](src/quant_mcp/task_process.py) | Standalone process launcher retained for integrations that explicitly need an isolated agent task. |
+| [agent/registered.py](src/quant_mcp/agent/registered.py) | Build smolagents tools from the shared registry, run CodeAgent, validate final answers, save reports and execution traces. |
 | [agent/model.py](src/quant_mcp/agent/model.py) | Model configuration and scoped instrumentation of generation methods, including streaming. |
 | [artifacts.py](src/quant_mcp/artifacts.py) | List tasks/files and read bounded text/base64 chunks with path checks. |
 | [tracing.py](src/quant_mcp/tracing.py) | OpenTelemetry spans, context injection/extraction and the application-owned SDK setup hook. |
@@ -913,66 +961,71 @@ and artifact access. Pricing stays outside `src/`.
 At startup, `MCPFramework(...)` creates a FastMCP server and its built-in tools.
 For each `app.expose(function, ...)`:
 
-1. The framework checks that the function is importable by module/name, has typed
-   named parameters and a return annotation, and uses an available tool name.
+1. The framework checks that the callable has typed named parameters and a return
+   annotation, and uses an available tool name. Isolated callables must be
+   importable top-level functions.
 2. It registers an MCP wrapper with the function's signature and docstring.
    The MCP SDK derives schemas and validates incoming arguments.
-3. It records a registry entry containing the exposed name, import target,
-   description, argument schema and timeout. The agent uses this same registration.
+3. It records a registry entry containing the exposed name, callable, description,
+   argument schema, timeout and execution mode. The agent uses this same entry.
 
 The MCP client lists the tools and presents them to its assistant. Function
 registration does not execute a model or scan the library for more capabilities.
 Importing the selected module is normal Python loading, not repository discovery.
 
 There is no server-side natural-language router. `run_coding_task` is another MCP
-tool the client may choose. Direct calls never silently escalate to it, and the
-agent does not call the server recursively over MCP.
+tool the client may choose. Direct calls never silently escalate to it. The
+embedded agent uses adapters over the shared registry, so it does not call the
+server recursively over MCP.
 
 ### Process boundaries
 
 ```mermaid
 flowchart LR
     Client[MCP client assistant] -->|stdio MCP| Server[Framework server process]
-    Server -->|Direct call| Direct[Function process]
-    Server -->|run_coding_task| Task[Task worker process]
-    Task --> Agent[CodeAgent interpreter]
+    Server -->|Isolated direct call| Direct[Function process]
+    Server -->|run_coding_task| Agent[CodeAgent in background thread]
     Agent <-->|Plans and code actions| Model[Configured model endpoint]
-    Agent -->|Registered wrapper| Function[Function process]
+    Agent -->|Isolated registered function| Function[Function process]
+    Server -->|In-process registered function| Service[Shared app service]
+    Agent -->|In-process registered function| Service
     Direct --> Library[Installed or local domain library]
     Function --> Library
-    Task --> Files[Task files and reports]
+    Service --> Library
+    Agent --> Files[Task files and reports]
     Server -->|Artifact tools| Files
 ```
 
-**Direct execution:** the server validates the incoming call, starts a function
-process, and waits for its serialized result. The child imports the target and
-uses MCP's function metadata to validate/reconstruct arguments, including typed
-models. It awaits async functions when needed. Python and native stdout/stderr
-go to a file, keeping the MCP stdout stream clean.
+**Direct execution:** the server validates the incoming call and dispatches it
+according to the registration. An isolated function starts a child process for
+that call; an in-process function runs in the server process. Isolated worker
+stdout/stderr go to a file, keeping the MCP stdout stream clean. In-process
+functions must log to stderr rather than print to stdout.
 
-**Agent execution:** the server snapshots the current registry into a request and
-allocates a task ID/directory, then starts a task worker. The worker creates a
-CodeAgent with
+**Agent execution:** the server allocates a task ID/directory and creates a
+CodeAgent in a background thread, using
 registered function wrappers, `write_artifact`, `read_written_artifact`, and
 smolagents' `final_answer`. Generated Python runs in the agent's interpreter.
-Each domain-function invocation starts a function process through the same
-execution helper used by direct MCP calls. Its results/errors become observations
-for the agent's next action. The model can repair code within the configured
-budgets; this can also repeat side effects.
+Each wrapper dispatches to the callable stored in the shared registry. Isolated
+functions still start a child process; in-process functions use the same service
+instance as direct MCP calls. Results/errors become observations for the agent's
+next action. The model can repair code within the configured budgets; this can
+also repeat side effects.
 
-The worker receives model-generated actions, not a requirement to create and run a
-standalone `analysis.py`. Standard interpreter helpers support loops and
+The agent interpreter receives model-generated actions, not a requirement to
+create and run a standalone `analysis.py`. Standard interpreter helpers support loops and
 aggregation. Repository-reading tools and domain-module import permissions are
-not supplied to the interpreter. The trusted function processes import your
-library normally and can use its dependencies.
+not supplied to the interpreter. Registered callables can use their normal
+library dependencies.
 
 ### State and completion
 
 | State | Lifetime |
 | --- | --- |
-| Exposed function registry | Server instance; a snapshot is taken for each coding task. |
+| Exposed function registry | Server instance; shared by MCP and smolagents. |
 | Agent variables and observations | One coding task, across its code actions. |
-| Function-local objects and connections | One function process; not retained for the next call. |
+| Isolated function objects and connections | One function process; not retained for the next call. |
+| In-process service state, connections and cache | Server process; retained between calls and cleared when it restarts. |
 | Agent conversation across separate MCP tasks | Not shared. Pass required context in the next task's prompt. |
 | Results, reports and diagnostics | Persist on disk until removed by the operator; no automatic retention policy. |
 
@@ -991,9 +1044,9 @@ and injected tools, so they are not standalone replay scripts.
 | Limit | Default / maximum | Where configured |
 | --- | --- | --- |
 | Active direct calls/coding tasks | 2 per server instance | `MCPFramework(max_concurrent_calls=...)` |
-| Overall task timeout | 300 seconds by default; capped by server maximum | `run_coding_task(timeout_seconds=...)`, `max_timeout_seconds` |
+| Agent task deadline | 300 seconds by default; checked between agent steps and capped by server maximum | `run_coding_task(timeout_seconds=...)`, `max_timeout_seconds` |
 | Individual function timeout | 60 seconds; must not exceed the server maximum | `app.expose(..., timeout_seconds=...)` |
-| Function response size | 1 MiB serialized worker response | Fixed execution-helper limit. |
+| Isolated function response size | 1 MiB serialized worker response | Fixed execution-helper limit; in-process results use MCP serialization. |
 | Agent-written artifact size | 1 MiB per file | Fixed artifact-writer limit. |
 | Artifact read chunk | 64 KiB default, 256 KiB maximum | `read_artifact(max_bytes=...)` |
 | Inline saved result | 256 KiB | `get_task_result`; larger files require chunked reads. |
@@ -1003,11 +1056,12 @@ not acquire additional server slots. Excess work is rejected with
 "Server busy", rather than queued. Artifact reads do not use that admission limit.
 Model/action/call budgets are listed in the [configuration guide](#configure-the-model).
 
-Direct function workers have their own process groups. Agent function workers
-join their task worker's group, allowing overall timeout/cancellation to stop the
-active task and its function processes. The implementation targets POSIX systems.
-Cancellation or timeout does not roll back a database write or other external
-side effect. MCP calls wait for completion; there is no durable submit/poll queue.
+Isolated function workers have their own process groups and can be terminated on
+timeout. In-process synchronous calls cannot be forcibly terminated, and an agent
+task deadline is checked between steps; set database and network timeouts. Use
+isolated execution for functions that require a hard timeout. Cancellation or
+timeout does not roll back a database write or other external side effect. MCP
+calls wait for completion; there is no durable submit/poll queue.
 
 ## Deployment boundaries
 
