@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import atexit
-import fcntl
 import json
 import logging
 import logging.handlers
@@ -16,6 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from opentelemetry import trace
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 logger = logging.getLogger("quant_mcp.audit")
 _listener = None
@@ -54,13 +58,28 @@ current_run: ContextVar[RunContext | None] = ContextVar("quant_mcp_run", default
 
 def _append(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-        try:
-            stream.write(line + "\n")
-            stream.flush()
-        finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    with path.open("a+", encoding="utf-8") as stream:
+        if os.name == "nt":
+            # Lock a sidecar byte so the JSONL file remains free of lock data.
+            with path.with_name(path.name + ".lock").open("a+b") as lock:
+                if lock.seek(0, os.SEEK_END) == 0:
+                    lock.write(b"\0")
+                    lock.flush()
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    stream.write(line + "\n")
+                    stream.flush()
+                finally:
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                stream.write(line + "\n")
+                stream.flush()
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 class _ProgressFiles(logging.Handler):

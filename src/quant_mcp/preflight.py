@@ -10,12 +10,13 @@ import logging
 import os
 from pathlib import Path
 import runpy
-import signal
 import subprocess
 import sys
 import tempfile
 import traceback
 from urllib.parse import urlsplit
+
+from quant_mcp.processes import kill_process, process_group_options
 
 
 def check(name, status, message, fix=None):
@@ -45,15 +46,12 @@ def spawn_stage(arguments, folder, label, timeout, *, env=None, cwd=None):
         process = subprocess.Popen(
             [sys.executable, "-m", "quant_mcp.preflight", *arguments],
             stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-            cwd=cwd, env=env, start_new_session=label == "inspection",
+            cwd=cwd, env=env, **process_group_options(label == "inspection"),
         )
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            if label == "inspection":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
+            kill_process(process, entire_group=label == "inspection")
             process.wait()
             return check(label, "FAIL", f"Timed out after {timeout:g} seconds.",
                          "Check for blocking module imports or an unguarded app.run(); increase --timeout for slow imports.")
@@ -249,8 +247,10 @@ def main(argv=None):
     folder = Path(tempfile.mkdtemp(prefix="quant-mcp-preflight-"))
     if not args.json:
         print(f"MCP pre-flight: {server}\nChecking startup, configuration and worker imports...", flush=True)
+    platform_supported = os.name in {"posix", "nt"}
     rows = [check("python", "PASS" if sys.version_info >= (3, 11) else "FAIL", f"Python {sys.version.split()[0]}: {sys.executable}"),
-            check("platform", "PASS" if os.name == "posix" else "FAIL", "POSIX workers required (macOS/Linux).")]
+            check("platform", "PASS" if platform_supported else "FAIL",
+                  f"{sys.platform} worker process support is {'enabled' if platform_supported else 'unavailable'}.")]
     for package in ("mcp", "anyio", "pydantic", "opentelemetry-api"):
         try:
             rows.append(check("dependency", "PASS", f"{package} {importlib.metadata.version(package)} installed."))
