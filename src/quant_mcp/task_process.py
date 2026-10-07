@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import signal
 import sys
 import tempfile
 import uuid
@@ -13,6 +12,7 @@ from pathlib import Path
 
 from quant_mcp.progress import RunContext, current_run, emit_event, flush_progress_logs, new_task_id
 from quant_mcp.tracing import configure_telemetry, extracted_context, flush_telemetry, inject_context, operation, set_outcome
+from quant_mcp.processes import kill_process, process_group_options
 
 async def run_task_process(
     prompt: str, timeout_seconds: int, *, artifacts_dir: Path,
@@ -64,7 +64,7 @@ async def _run_task_process(
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=log, stderr=log,
                 cwd=temp_dir, env=env,
-                start_new_session=True,
+                **process_group_options(),
             )
             emit_event(trace, "task_worker_started", worker_pid=process.pid,
                        worker_log=str(log_path))
@@ -81,10 +81,7 @@ async def _run_task_process(
                 cancellation = exc
             finally:
                 # Also stop active function workers on timeout or cancellation.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                kill_process(process)
                 await process.wait()
                 emit_event(trace, "task_worker_finished", worker_pid=process.pid,
                            return_code=process.returncode,
